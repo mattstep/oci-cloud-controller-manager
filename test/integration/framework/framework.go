@@ -33,9 +33,12 @@ const (
 
 // Framework used to help with integration testing.
 type Framework struct {
-	configFile    string
+	configFile string
+
 	nodeSubnetOne string
 	nodeSubnetTwo string
+
+	instanceImageID string
 
 	Config    *client.Config
 	Client    client.Interface
@@ -45,7 +48,8 @@ type Framework struct {
 // New testing framework.
 func New() *Framework {
 	return &Framework{
-		configFile: path.Join(os.Getenv("HOME"), ".oci", "cloud-provider.yaml"),
+		configFile:      path.Join(os.Getenv("HOME"), ".oci", "cloud-provider.yaml"),
+		instanceImageID: instanceImageID,
 	}
 }
 
@@ -53,6 +57,10 @@ func New() *Framework {
 func (f *Framework) Init() error {
 	if os.Getenv("OCI_CONFIG_FILE") != "" {
 		f.configFile = os.Getenv("OCI_CONFIG_FILE")
+	}
+
+	if os.Getenv("INSTANCE_IMAGE_ID") != "" {
+		f.instanceImageID = os.Getenv("INSTANCE_IMAGE_ID")
 	}
 
 	file, err := os.Open(f.configFile)
@@ -117,7 +125,7 @@ func (f *Framework) CreateInstance(availabilityDomain string, subnetID string) (
 	instance, err := f.Client.LaunchInstance(
 		availabilityDomain,
 		f.Config.Auth.CompartmentOCID,
-		instanceImageID,
+		f.instanceImageID,
 		instanceShape,
 		subnetID,
 		&baremetal.LaunchInstanceOptions{},

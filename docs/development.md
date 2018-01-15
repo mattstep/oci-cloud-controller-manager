@@ -77,8 +77,9 @@ OCIDs):
 
 ```
 $ OCI_CONFIG_FILE=cloud-provider.yaml \
-   NODE_SUBNET_ONE=ocid1.subnet.oc1.phx.aa... \
-   NODE_SUBNET_TWO=ocid1.subnet.oc1.phx.aa... \
+   INSTANCE_IMAGE_ID=ocid1.image.oc1.iad.aa... \
+   NODE_SUBNET_ONE=ocid1.subnet.oc1.iad.aa... \
+   NODE_SUBNET_TWO=ocid1.subnet.oc1.iad.aa... \
    go test -timeout 45m -v ./test/integration/loadbalancer
 ```
 
