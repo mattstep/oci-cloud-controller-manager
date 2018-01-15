@@ -20,9 +20,12 @@ import (
 
 	"github.com/golang/glog"
 	baremetal "github.com/oracle/bmcs-go-sdk"
-	"github.com/oracle/oci-cloud-controller-manager/pkg/oci/client"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
+
+	"github.com/oracle/oci-cloud-controller-manager/pkg/oci/client"
 )
 
 const (
@@ -95,22 +98,38 @@ func (s *securityListManagerImpl) Delete(
 
 // updateBackendRules handles adding ingress rules to the backend subnets from the load balancer subnets.
 func (s *securityListManagerImpl) updateBackendRules(lbSubnets []*baremetal.Subnet, nodeSubnets []*baremetal.Subnet, backendPort uint64) error {
-	for _, subnet := range nodeSubnets {
-		secList, err := s.client.GetDefaultSecurityList(subnet)
+	var (
+		lastErr error
+		secList *baremetal.SecurityList
+		subnet  *baremetal.Subnet
+	)
+
+	for _, subnet = range nodeSubnets {
+		err := wait.ExponentialBackoff(retry.DefaultBackoff, func() (bool, error) {
+			secList, lastErr = s.client.GetDefaultSecurityList(subnet)
+			if lastErr != nil {
+				return false, fmt.Errorf("get security list for subnet `%s`: %v", subnet.ID, lastErr)
+			}
+
+			ingressRules := getNodeIngressRules(secList, lbSubnets, backendPort)
+
+			if !securityListRulesChanged(secList, ingressRules, secList.EgressSecurityRules) {
+				glog.V(4).Infof("No changes for node subnet security list `%s`", secList.ID)
+				return true, nil
+			}
+
+			lastErr = s.updateSecurityListRules(secList.ID, secList.ETag, ingressRules, secList.EgressSecurityRules)
+			if lastErr != nil {
+				if client.IsConflict(lastErr) {
+					glog.Warningf("Conflict updating security list (retrying): %v", lastErr)
+					return false, nil
+				}
+				return false, lastErr
+			}
+			return true, nil
+		})
 		if err != nil {
-			return fmt.Errorf("get security list for subnet `%s`: %v", subnet.ID, err)
-		}
-
-		ingressRules := getNodeIngressRules(secList, lbSubnets, backendPort)
-
-		if !securityListRulesChanged(secList, ingressRules, secList.EgressSecurityRules) {
-			glog.V(4).Infof("No changes for node subnet security list `%s`", secList.ID)
-			continue
-		}
-
-		err = s.updateSecurityListRules(secList.ID, secList.ETag, ingressRules, secList.EgressSecurityRules)
-		if err != nil {
-			return fmt.Errorf("update security list rules `%s` for subnet `%s: %v", secList.ID, subnet.ID, err)
+			return fmt.Errorf("update security list rules `%s` for subnet `%s: %v", secList.ID, subnet.ID, lastErr)
 		}
 	}
 
@@ -120,27 +139,43 @@ func (s *securityListManagerImpl) updateBackendRules(lbSubnets []*baremetal.Subn
 // updateLoadBalancerRules handles updating the ingress and egress rules for the load balance subnets.
 // If the listener is nil, then only egress rules from the load balancer to the backend subnets will be checked.
 func (s *securityListManagerImpl) updateLoadBalancerRules(lbSubnets []*baremetal.Subnet, nodeSubnets []*baremetal.Subnet, sourceCIDRs []string, listenerPort uint64, backendPort uint64) error {
-	for _, lbSubnet := range lbSubnets {
-		lbSecurityList, err := s.client.GetDefaultSecurityList(lbSubnet)
+	var (
+		lastErr        error
+		lbSecurityList *baremetal.SecurityList
+		lbSubnet       *baremetal.Subnet
+	)
+
+	for _, lbSubnet = range lbSubnets {
+		err := wait.ExponentialBackoff(retry.DefaultBackoff, func() (bool, error) {
+			lbSecurityList, lastErr = s.client.GetDefaultSecurityList(lbSubnet)
+			if lastErr != nil {
+				return false, fmt.Errorf("get lb security list for subnet `%s`: %v", lbSubnet.ID, lastErr)
+			}
+
+			lbEgressRules := getLoadBalancerEgressRules(lbSecurityList, nodeSubnets, backendPort)
+
+			lbIngressRules := lbSecurityList.IngressSecurityRules
+			if listenerPort != 0 {
+				lbIngressRules = getLoadBalancerIngressRules(lbSecurityList, sourceCIDRs, listenerPort)
+			}
+
+			if !securityListRulesChanged(lbSecurityList, lbIngressRules, lbEgressRules) {
+				glog.V(4).Infof("No changes for lb subnet security list `%s`", lbSecurityList.ID)
+				return true, nil
+			}
+
+			lastErr = s.updateSecurityListRules(lbSecurityList.ID, lbSecurityList.ETag, lbIngressRules, lbEgressRules)
+			if lastErr != nil {
+				if client.IsConflict(lastErr) {
+					glog.Warningf("Conflict updating security list (retrying): %v", lastErr)
+					return false, nil
+				}
+				return false, lastErr
+			}
+			return true, nil
+		})
 		if err != nil {
-			return fmt.Errorf("get lb security list for subnet `%s`: %v", lbSubnet.ID, err)
-		}
-
-		lbEgressRules := getLoadBalancerEgressRules(lbSecurityList, nodeSubnets, backendPort)
-
-		lbIngressRules := lbSecurityList.IngressSecurityRules
-		if listenerPort != 0 {
-			lbIngressRules = getLoadBalancerIngressRules(lbSecurityList, sourceCIDRs, listenerPort)
-		}
-
-		if !securityListRulesChanged(lbSecurityList, lbIngressRules, lbEgressRules) {
-			glog.V(4).Infof("No changes for lb subnet security list `%s`", lbSecurityList.ID)
-			continue
-		}
-
-		err = s.updateSecurityListRules(lbSecurityList.ID, lbSecurityList.ETag, lbIngressRules, lbEgressRules)
-		if err != nil {
-			return fmt.Errorf("update lb security list rules `%s` for subnet `%s: %v", lbSecurityList.ID, lbSubnet.ID, err)
+			return fmt.Errorf("update lb security list rules `%s` for subnet `%s: %v", lbSecurityList.ID, lbSubnet.ID, lastErr)
 		}
 	}
 
