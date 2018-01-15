@@ -15,16 +15,20 @@ package loadbalancer
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/golang/glog"
-	"github.com/oracle/oci-cloud-controller-manager/pkg/oci"
-	"github.com/oracle/oci-cloud-controller-manager/pkg/oci/client"
+	baremetal "github.com/oracle/bmcs-go-sdk"
+
 	api "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
+	intstr "k8s.io/apimachinery/pkg/util/intstr"
 	listersv1 "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/tools/cache"
+	cache "k8s.io/client-go/tools/cache"
+
+	"github.com/oracle/oci-cloud-controller-manager/pkg/oci"
+	"github.com/oracle/oci-cloud-controller-manager/pkg/oci/client"
 )
 
 func TestPublicLoadBalancer(t *testing.T) {
@@ -58,7 +62,7 @@ func testLoadBalancer(t *testing.T, internal bool) {
 					Name:       "http",
 					Protocol:   api.ProtocolTCP,
 					Port:       80,
-					NodePort:   8080,
+					NodePort:   32566,
 					TargetPort: intstr.FromInt(9090),
 				},
 			},
@@ -89,7 +93,6 @@ func testLoadBalancer(t *testing.T, internal bool) {
 
 	nodes := []*api.Node{}
 	for _, subnetID := range fw.NodeSubnets() {
-
 		subnet, err := fw.Client.GetSubnet(subnetID)
 		if err != nil {
 			t.Fatal(err)
@@ -125,7 +128,7 @@ func testLoadBalancer(t *testing.T, internal bool) {
 		nodes = append(nodes, node)
 	}
 
-	glog.Info("Stating test on creating initial load balancer")
+	glog.Info("Starting test on creating initial load balancer")
 
 	status, err := loadbalancers.EnsureLoadBalancer("foo", service, nodes)
 	if err != nil {
@@ -139,7 +142,7 @@ func testLoadBalancer(t *testing.T, internal bool) {
 		t.Fatalf("validation error: %v", err)
 	}
 
-	glog.Info("Stating test on decreasing node count to 1")
+	glog.Info("Starting test on decreasing node count to 1")
 
 	// Decrease the number of backends to 1
 	lessNodes := []*api.Node{nodes[0]}
@@ -153,7 +156,7 @@ func testLoadBalancer(t *testing.T, internal bool) {
 		t.Fatalf("validation error: %v", err)
 	}
 
-	glog.Info("Stating test on increasing node count back to 2")
+	glog.Info("Starting test on increasing node count back to 2")
 
 	// Go back to 2 nodes
 	status, err = loadbalancers.EnsureLoadBalancer("foo", service, nodes)
@@ -166,10 +169,10 @@ func testLoadBalancer(t *testing.T, internal bool) {
 		t.Fatalf("validation error: %v", err)
 	}
 
-	glog.Info("Stating test on changing service port")
+	glog.Info("Starting test on changing service port")
 
 	// Validate changing the service port.
-	service.Spec.Ports[0].Port = 81
+	service.Spec.Ports[0].Port = 8080
 	status, err = loadbalancers.EnsureLoadBalancer("foo", service, nodes)
 	if err != nil {
 		t.Fatalf("Unable to ensure the load balancer: %v", err)
@@ -180,9 +183,9 @@ func testLoadBalancer(t *testing.T, internal bool) {
 		t.Fatalf("validation error: %v", err)
 	}
 
-	glog.Info("Stating test on changing node port")
+	glog.Info("Starting test on changing node port")
 	// Validate changing the node port.
-	service.Spec.Ports[0].NodePort = 8081
+	service.Spec.Ports[0].NodePort = 32567
 	status, err = loadbalancers.EnsureLoadBalancer("foo", service, nodes)
 	if err != nil {
 		t.Fatalf("Unable to ensure the load balancer: %v", err)
@@ -201,6 +204,40 @@ func validateLoadBalancer(client client.Interface, service *api.Service, nodes [
 	lb, err := client.GetLoadBalancerByName(oci.GetLoadBalancerName(service))
 	if err != nil {
 		return err
+	}
+
+	for _, subnetID := range lb.SubnetIDs {
+		// Get SecurityList
+		subnet, err := client.GetSubnet(subnetID)
+		if err != nil {
+			return err
+		}
+		secList, err := client.GetDefaultSecurityList(subnet)
+		if err != nil {
+			return err
+		}
+
+		// Check an ingress security list rule exists for each source range for
+		// each lb subnet.
+		sourceRanges, err := oci.GetLoadBalancerSourceRanges(service)
+		if err != nil {
+			return err
+		}
+		for _, sourceRange := range sourceRanges {
+			err := assertSecListContainsIngressRule(secList, baremetal.IngressSecurityRule{
+				Protocol: fmt.Sprintf("%d", ProtocolTCP),
+				Source:   sourceRange,
+				TCPOptions: &baremetal.TCPOptions{
+					DestinationPortRange: &baremetal.PortRange{
+						Min: uint64(service.Spec.Ports[0].Port),
+						Max: uint64(service.Spec.Ports[0].Port),
+					},
+				},
+			})
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	if len(lb.Listeners) != 1 {
@@ -228,4 +265,22 @@ func validateLoadBalancer(client client.Interface, service *api.Service, nodes [
 	}
 
 	return nil
+}
+
+func assertSecListContainsEgressRule(secList *baremetal.SecurityList, rule baremetal.EgressSecurityRule) error {
+	for _, r := range secList.EgressSecurityRules {
+		if reflect.DeepEqual(r, rule) {
+			return nil
+		}
+	}
+	return fmt.Errorf("Security list %q does not contain egress rule %+v", secList.ID, rule)
+}
+
+func assertSecListContainsIngressRule(secList *baremetal.SecurityList, rule baremetal.IngressSecurityRule) error {
+	for _, r := range secList.IngressSecurityRules {
+		if reflect.DeepEqual(r, rule) {
+			return nil
+		}
+	}
+	return fmt.Errorf("Security list %q does not contain ingress rule %+v", secList.ID, rule)
 }

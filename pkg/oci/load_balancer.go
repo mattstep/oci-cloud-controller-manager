@@ -199,7 +199,7 @@ func (cp *CloudProvider) EnsureLoadBalancer(clusterName string, service *api.Ser
 		}
 	}
 
-	sourceCIDRs, err := getLoadBalancerSourceRanges(service)
+	sourceCIDRs, err := GetLoadBalancerSourceRanges(service)
 	if err != nil {
 		return nil, err
 	}
@@ -524,16 +524,13 @@ func loadBalancerToStatus(lb *baremetal.LoadBalancer) (*api.LoadBalancerStatus, 
 	return &api.LoadBalancerStatus{Ingress: ingress}, nil
 }
 
-func getLoadBalancerSourceRanges(service *api.Service) ([]string, error) {
+// GetLoadBalancerSourceRanges returns a string slice of load balancer source
+// CIDR ranges.
+func GetLoadBalancerSourceRanges(service *api.Service) ([]string, error) {
 	sourceRanges, err := apiservice.GetLoadBalancerSourceRanges(service)
 	if err != nil {
 		return []string{}, err
 	}
 
-	sourceCIDRs := make([]string, 0, len(sourceRanges))
-	for _, sourceRange := range sourceRanges {
-		sourceCIDRs = append(sourceCIDRs, sourceRange.String())
-	}
-
-	return sourceCIDRs, nil
+	return sourceRanges.StringSlice(), nil
 }
