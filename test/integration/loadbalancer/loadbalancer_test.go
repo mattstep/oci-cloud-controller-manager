@@ -217,15 +217,14 @@ func validateLoadBalancer(client client.Interface, service *api.Service, nodes [
 			return err
 		}
 
-		// Check an ingress security list rule exists for each source range for
-		// each lb subnet.
+		// Check an ingress security list rule exists for each source range
 		sourceRanges, err := oci.GetLoadBalancerSourceRanges(service)
 		if err != nil {
 			return err
 		}
 		for _, sourceRange := range sourceRanges {
 			err := assertSecListContainsIngressRule(secList, baremetal.IngressSecurityRule{
-				Protocol: fmt.Sprintf("%d", ProtocolTCP),
+				Protocol: fmt.Sprintf("%d", oci.ProtocolTCP),
 				Source:   sourceRange,
 				TCPOptions: &baremetal.TCPOptions{
 					DestinationPortRange: &baremetal.PortRange{
